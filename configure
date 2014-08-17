@@ -1,0 +1,109 @@
+#!/usr/bin/env python
+
+import pipes
+import os
+import sys
+import subprocess
+import itertools
+
+HERE = os.path.dirname(__file__)
+SOURCE_TREE = os.path.join(HERE, 'src')
+THIRD_PARTY = os.path.join(HERE, 'third_party')
+
+sys.path.append(THIRD_PARTY)
+import click
+
+DEVNULL = open(os.devnull, "wb")
+
+
+class PythonNotFoundError(Exception):
+    pass
+
+
+def guess_python_prefix():
+    try:
+        return subprocess.check_output(
+            "python-config --prefix".split()).rstrip()
+    except (OSError, subprocess.CalledProcessError) as e:
+        return None
+
+def find_python_lib(prefix):
+    suffixes = (('2.7', '2.6'), ('dylib', 'a', 'so'))
+
+    for a, b in itertools.product(*suffixes):
+        path = os.path.join(
+            prefix, 'lib', 'libpython{0}.{1}'.format(a, b))
+        if os.path.isfile(path):
+            return path
+
+    raise PythonNotFoundError
+
+
+def find_python_include_dir(prefix):
+    for suffix in ('2.7', '2.6'):
+        path = os.path.join(
+            prefix, 'include', 'python{0}'.format(suffix))
+        if os.path.isdir(path):
+            return path
+
+    raise PythonNotFoundError
+
+
+def cmake_python_arguments(prefix):
+    try:
+        lib_path = find_python_lib(prefix)
+        include_path = find_python_include_dir(prefix)
+    except PythonNotFoundError:
+        return []
+
+    return ["-DPYTHON_INCLUDE_DIR={0}".format(include_path),
+            "-DPYTHON_LIBRARY={0}".format(lib_path)]
+
+
+def shelljoin(args):
+    return " ".join(pipes.quote(arg) for arg in args)
+
+
+@click.command()
+@click.option('--with-python', 'python_prefix',
+              type=click.Path(exists=True, file_okay=False),
+              default=guess_python_prefix)
+@click.option('--cmake-path', type=click.Path(), default='cmake')
+@click.option('--cmake-generator', '-G')
+@click.option('--debug', 'build_type', flag_value='Debug')
+@click.option('--release', 'build_type', flag_value='MinSizeRel')
+@click.option('--build-type', default='MinSizeRel',
+              type=click.Choice(['Debug', 'MinSizeRel']))
+@click.argument("extra_cmake_ops", nargs=-1)
+def configure(
+        python_prefix,
+        cmake_path,
+        cmake_generator,
+        build_type,
+        extra_cmake_ops):
+    """Script for configuring pyinstrument"""
+
+    if os.path.samefile(HERE, os.getcwd()):
+        click.echo("{0}: We only support out-of-source builds; please cd to "
+                   "another directory and invoke configure from there.".format(
+                       click.style('ERROR', fg='red')), err=True)
+        sys.exit(1)
+
+    command_line = [cmake_path, SOURCE_TREE]
+    command_line.append('-DCMAKE_BUILD_TYPE={0}'.format(build_type))
+    command_line.append('-DCMAKE_EXPORT_COMPILE_COMMANDS=ON')
+    command_line.append('--warn-uninitialized')
+    if cmake_generator:
+        command_line.append("-G{0}".format(cmake_generator))
+    if python_prefix:
+        command_line.extend(cmake_python_arguments(python_prefix))
+    command_line.extend(extra_cmake_ops)
+
+    click.secho("# Invoking CMake:", fg='blue')
+    click.echo("\t", nl=False)
+    click.echo(shelljoin(command_line))
+    subprocess.check_call(command_line)
+
+if __name__ == '__main__':
+    configure()
+
